@@ -1,0 +1,195 @@
+diff --git a/main.c b/main.c
+index 07f53cb..d846f6c 100644
+--- a/main.c
++++ b/main.c
+@@ -8,6 +8,7 @@
+ #include "utils.h"
+ #include "settings.h"
+ #include "pki.h"
++#include "version.h"
+ #include "nca.h"
+ #include "xci.h"
+ #include "nax0.h"
+@@ -21,7 +22,7 @@ static const char *prog_name = "hactool";
+ /* Print usage. Taken largely from ctrtool. */
+ static void usage(void) {
+     fprintf(stderr,
+-        "hactool (c) SciresM.\n"
++        "hactool " HACTOOL_VERSION " (c) SciresM.\n"
+         "Built: %s %s\n"
+         "\n"
+         "Usage: %s [options...] <file>\n"
+@@ -134,6 +135,7 @@ int main(int argc, char **argv) {
+     base_ctx.file_type = FILETYPE_NCA;
+ 
+     nca_ctx.tool_ctx->action = ACTION_INFO | ACTION_EXTRACT;
++    int explicit_info = 0, explicit_extract = 0;
+     pki_initialize_keyset(&tool_ctx.settings.keyset, KEYSET_RETAIL);
+ 
+     while (1) {
+@@ -204,9 +206,11 @@ int main(int argc, char **argv) {
+         {
+             case 'i':
+                 nca_ctx.tool_ctx->action |= ACTION_INFO;
++                explicit_info = 1;
+                 break;
+             case 'x':
+                 nca_ctx.tool_ctx->action |= ACTION_EXTRACT;
++                explicit_extract = 1;
+                 break;
+             case 'y':
+                 nca_ctx.tool_ctx->action |= ACTION_VERIFY;
+@@ -473,6 +477,11 @@ int main(int argc, char **argv) {
+ 
+     /* Try to load titlekeys. */
+     FILE *titlekeyfile = open_key_file("title");
++    /* -x on its own means extract only; -i -x still does both. */
++    if (explicit_extract && !explicit_info) {
++        nca_ctx.tool_ctx->action &= ~(ACTION_INFO);
++    }
++
+     if (titlekeyfile != NULL) {
+         extkeys_parse_titlekeys(&tool_ctx.settings, titlekeyfile);
+     }
+diff --git a/nca.c b/nca.c
+index 2630a11..b3c084e 100644
+--- a/nca.c
++++ b/nca.c
+@@ -547,7 +547,7 @@ void nca_process(nca_ctx_t *ctx) {
+                 case PFS0:
+                     nca_process_pfs0_section(&ctx->section_contexts[i]);
+                     /* Verify NPDM sig now, if we can... */
+-                    if (ctx->section_contexts[i].pfs0_ctx.is_exefs) {
++                    if (ctx->section_contexts[i].pfs0_ctx.is_exefs && ctx->section_contexts[i].pfs0_ctx.npdm != NULL) {
+                         ctx->npdm = ctx->section_contexts[i].pfs0_ctx.npdm;
+                         if (rsa2048_pss_verify(&ctx->header.magic, 0x200, ctx->header.npdm_key_sig, npdm_get_acid(ctx->npdm)->modulus)) {
+                             ctx->npdm_sig_validity = VALIDITY_VALID;
+@@ -1030,6 +1030,11 @@ void nca_process_pfs0_section(nca_section_ctx_t *ctx) {
+ 
+             if (ctx->pfs0_ctx.npdm->magic == MAGIC_META) {
+                 ctx->pfs0_ctx.is_exefs = 1;
++                if (!npdm_is_valid(ctx->pfs0_ctx.npdm, cur_file->size)) {
++                    fprintf(stderr, "[WARN] main.npdm has a layout this hactool doesn't know; skipping its info.\n");
++                    free(ctx->pfs0_ctx.npdm);
++                    ctx->pfs0_ctx.npdm = NULL;
++                }
+             }
+         }
+     }
+diff --git a/npdm.c b/npdm.c
+index 8457ec5..b83d303 100644
+--- a/npdm.c
++++ b/npdm.c
+@@ -484,6 +484,9 @@ static void sac_parse(char *sac, uint32_t sac_size, sac_entry_t *r_host, sac_ent
+     while (ofs < sac_size) {
+         ctrl = sac[ofs++];
+         service_len = (ctrl & 0xF) + 1;
++        if (service_len > sac_size - ofs) {
++            break;
++        }
+         cur_entry = calloc(1, sizeof(sac_entry_t));
+         if (ctrl & 0x80) {
+             cur_entry->valid = r_host != NULL ? sac_matches(r_host, cur_entry->service) : 1;
+@@ -591,6 +594,35 @@ static void fac_print(fac_t *fac, fah_t *fah) {
+     printf("\n");
+ }
+ 
++static int npdm_region_ok(uint64_t ofs, uint64_t len, uint64_t limit) {
++    return ofs <= limit && len <= limit - ofs;
++}
++
++/* Checks that every offset/size the NPDM code follows stays inside the file. */
++int npdm_is_valid(const npdm_t *npdm, uint64_t size) {
++    if (npdm == NULL || size < sizeof(npdm_t) || npdm->magic != MAGIC_META) {
++        return 0;
++    }
++    if (!npdm_region_ok(npdm->acid_offset, npdm->acid_size, size) || npdm->acid_size < sizeof(npdm_acid_t) ||
++        !npdm_region_ok(npdm->aci0_offset, npdm->aci0_size, size) || npdm->aci0_size < sizeof(npdm_aci0_t)) {
++        return 0;
++    }
++    const npdm_acid_t *acid = (const npdm_acid_t *)((const char *)npdm + npdm->acid_offset);
++    const npdm_aci0_t *aci0 = (const npdm_aci0_t *)((const char *)npdm + npdm->aci0_offset);
++    if (!npdm_region_ok(acid->kac_offset, acid->kac_size, npdm->acid_size) ||
++        !npdm_region_ok(acid->sac_offset, acid->sac_size, npdm->acid_size) ||
++        !npdm_region_ok(acid->fac_offset, sizeof(fac_t), npdm->acid_size) ||
++        !npdm_region_ok(acid->modulus - (const uint8_t *)acid, (uint64_t)acid->size, npdm->acid_size)) {
++        return 0;
++    }
++    if (!npdm_region_ok(aci0->kac_offset, aci0->kac_size, npdm->aci0_size) ||
++        !npdm_region_ok(aci0->sac_offset, aci0->sac_size, npdm->aci0_size) ||
++        !npdm_region_ok(aci0->fah_offset, sizeof(fah_t), npdm->aci0_size)) {
++        return 0;
++    }
++    return 1;
++}
++
+ void npdm_process(npdm_t *npdm, hactool_ctx_t *tool_ctx) {
+     if (tool_ctx->action & ACTION_INFO) {
+         npdm_print(npdm, tool_ctx);
+@@ -609,7 +641,7 @@ void npdm_print(npdm_t *npdm, hactool_ctx_t *tool_ctx) {
+     printf("    Default CPU ID:                 %"PRIx8"\n", npdm->default_cpuid);
+     printf("    Version:                        %"PRIu32".%"PRIu32".%"PRIu32"-%"PRIu32" (%"PRIu32")\n", (npdm->version >> 26) & 0x3F, (npdm->version >> 20) & 0x3F, (npdm->version >> 16) & 0xF, (npdm->version >> 0) & 0xFFFF, npdm->version);
+     printf("    Main Thread Stack Size:         0x%"PRIx32"\n", npdm->main_stack_size);
+-    printf("    Title Name:                     %s\n", npdm->title_name);
++    printf("    Title Name:                     %.*s\n", (int)sizeof(npdm->title_name), npdm->title_name);
+     npdm_acid_t *acid = npdm_get_acid(npdm);
+     npdm_aci0_t *aci0 = npdm_get_aci0(npdm);
+     printf("    ACID:\n");
+diff --git a/npdm.h b/npdm.h
+index 0a6e82e..952cf1e 100644
+--- a/npdm.h
++++ b/npdm.h
+@@ -133,6 +133,7 @@ static inline npdm_aci0_t *npdm_get_aci0(npdm_t *npdm) {
+     return (npdm_aci0_t *)((char *)npdm + npdm->aci0_offset);
+ }
+ 
++int npdm_is_valid(const npdm_t *npdm, uint64_t size);
+ void npdm_process(npdm_t *npdm, hactool_ctx_t *tool_ctx);
+ void npdm_print(npdm_t *npdm, hactool_ctx_t *tool_ctx);
+ void npdm_save(npdm_t *npdm, hactool_ctx_t *tool_ctx);
+diff --git a/pfs0.c b/pfs0.c
+index 3cc11fb..ce5b1dc 100644
+--- a/pfs0.c
++++ b/pfs0.c
+@@ -55,6 +55,11 @@ void pfs0_process(pfs0_ctx_t *ctx) {
+ 
+             if (ctx->npdm->magic == MAGIC_META) {
+                 ctx->is_exefs = 1;
++                if (!npdm_is_valid(ctx->npdm, cur_file->size)) {
++                    fprintf(stderr, "[WARN] main.npdm has a layout this hactool doesn't know; skipping its info.\n");
++                    free(ctx->npdm);
++                    ctx->npdm = NULL;
++                }
+             }
+         }
+     }
+@@ -114,7 +119,7 @@ void pfs0_save(pfs0_ctx_t *ctx) {
+ void pfs0_print(pfs0_ctx_t *ctx) {
+     printf("\n%s:\n", ctx->is_exefs ? "ExeFS" : "PFS0");
+     print_magic("Magic:                              ", ctx->header->magic);
+-    if (ctx->is_exefs) {
++    if (ctx->is_exefs && ctx->npdm != NULL) {
+         printf("Title ID:                           %016"PRIx64"\n", npdm_get_aci0(ctx->npdm)->title_id);
+     }
+     printf("Number of files:                    %"PRId32"\n", ctx->header->num_files);
+@@ -125,7 +130,7 @@ void pfs0_print(pfs0_ctx_t *ctx) {
+             printf("%spfs0:/%-32s %012"PRIx64"-%012"PRIx64"\n", i == 0 ? "                              " : "                                    ", pfs0_get_file_name(ctx->header, i), cur_file->offset, cur_file->offset + cur_file->size);
+         }
+     }
+-    if (ctx->is_exefs) {
++    if (ctx->is_exefs && ctx->npdm != NULL) {
+         npdm_process(ctx->npdm, ctx->tool_ctx);
+     }
+ }
+diff --git a/version.h b/version.h
+index a0815ad..5b5cc89 100644
+--- a/version.h
++++ b/version.h
+@@ -1,6 +1,6 @@
+ #ifndef HACTOOL_VERSION_H
+ #define HACTOOL_VERSION_H
+ 
+-#define HACTOOL_VERSION "1.4.0"
++#define HACTOOL_VERSION "1.4.0-nsp2nup1"
+ 
+ #endif

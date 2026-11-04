@@ -1,0 +1,23 @@
+# never commit keys or game files
+keys/*
+!keys/README.txt
+*.keys
+*.nsp
+*.nsz
+*.xci
+*.nup
+_nsp2nup_tmp_*/
+hactoolnet.exe
+# hactool.exe (patched, with hactool_LICENSE.txt) is committed on purpose
+hactoolnet
+hactool
+# decrypter libraries / .NET builds (never redistribute)
+*.dll
+*.deps.json
+*.runtimeconfig.json
+python/
+nsp2nup.exe
+build/
+dist/
+*.spec
+__pycache__/

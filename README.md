@@ -1,3 +1,13 @@
+# nsp2nup (personal fork of nup)
+
+This is a personal fork of [a55uka/nup](https://github.com/a55uka/nup), not the official nup repo.
+It adds **nsp2nup**, a drag-and-drop converter from Switch NSPs to .nup, in [`tools/nsp2nup/`](tools/nsp2nup/).
+It's a personal project and not meant for actual usage.
+
+Everything below is nup's original README.
+
+---
+
 # NUP - NX Package Format
 
 A container for unencrypted Nintendo Switch / Switch 2 game dumps. 

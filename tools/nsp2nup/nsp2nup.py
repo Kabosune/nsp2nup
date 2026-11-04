@@ -33,6 +33,7 @@ for _p in (os.path.join(TOOL_DIR, "..", "nup"), os.path.join(TOOL_DIR, "lib")):
 from nup import format as F  # noqa: E402
 from nup import meta as M  # noqa: E402
 from nup.pack import pack, have_zstd  # noqa: E402
+from nup.discover import parse_npdm_program_id  # noqa: E402
 
 # ---------------------------------------------------------------- constants
 
@@ -594,13 +595,38 @@ def unique_path(folder: str, stem: str) -> str:
     return out
 
 
+def _empty_base_title_id(src: str) -> int | None:
+    """Title ID for a dump whose base/ has no files (some dumpers keep only the fully
+    patched update). nup reads the ID from base/exefs/main.npdm, so take it from the
+    newest update's main.npdm instead."""
+    base = os.path.join(src, "base")
+    if not os.path.isdir(base) or any(files for _, _, files in os.walk(base)):
+        return None
+    upd = os.path.join(src, "updates")
+    if not os.path.isdir(upd):
+        return None
+    versions = sorted((v for v in os.listdir(upd) if v.isdigit()), key=int, reverse=True)
+    for v in versions:
+        npdm = os.path.join(upd, v, "exefs", "main.npdm")
+        if os.path.isfile(npdm):
+            with open(npdm, "rb") as fh:
+                tid = parse_npdm_program_id(fh.read())
+            if tid:
+                return tid
+    return None
+
+
 def pack_dump(src: str, out_dir: str | None, level: int) -> str:
     """Pack an already-extracted game folder (no keys or decrypter needed)."""
     name = os.path.basename(os.path.normpath(src))
     out = unique_path(out_dir or os.path.dirname(os.path.normpath(src)), safe_filename(name))
     log(f"== packing extracted folder {name}")
+    base_tid = _empty_base_title_id(src)
+    if base_tid is not None:
+        log(f"  base\\ is empty: using title ID {base_tid:016X} from the update, "
+            "which then carries the whole game")
     try:
-        packages = pack(out, src, level=level, progress=_progress)
+        packages = pack(out, src, level=level, base_title_id=base_tid, progress=_progress)
     except SystemExit as e:  # nup reports layout problems this way
         raise ConvertError(str(e))
     print()

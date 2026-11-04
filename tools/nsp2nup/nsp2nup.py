@@ -32,6 +32,7 @@ for _p in (os.path.join(TOOL_DIR, "..", "nup"), os.path.join(TOOL_DIR, "lib")):
 
 from nup import format as F  # noqa: E402
 from nup import meta as M  # noqa: E402
+import nup.pack as P  # noqa: E402
 from nup.pack import pack, have_zstd  # noqa: E402
 from nup.discover import parse_npdm_program_id  # noqa: E402
 
@@ -616,6 +617,27 @@ def _empty_base_title_id(src: str) -> int | None:
     return None
 
 
+def _without_base(fn):
+    """Pack as an update-only dump, the way nup does when there's no base/ at all.
+    An empty base/ (or one with only empty exefs/ romfs/ folders) would otherwise
+    become a base package with an empty ExeFS, and emulators then look there for
+    the game's code instead of in the update."""
+    orig = P.discover
+
+    def discover(src, base_title_id):
+        pkgs = [p for p in orig(src, base_title_id) if p.kind != F.KIND_BASE]
+        for p in pkgs:
+            if p.kind == F.KIND_UPDATE:
+                p.flags |= F.PKG_FLAG_STANDALONE_UPDATE
+        return pkgs
+
+    P.discover = discover
+    try:
+        return fn()
+    finally:
+        P.discover = orig
+
+
 def pack_dump(src: str, out_dir: str | None, level: int) -> str:
     """Pack an already-extracted game folder (no keys or decrypter needed)."""
     name = os.path.basename(os.path.normpath(src))
@@ -623,10 +645,13 @@ def pack_dump(src: str, out_dir: str | None, level: int) -> str:
     log(f"== packing extracted folder {name}")
     base_tid = _empty_base_title_id(src)
     if base_tid is not None:
-        log(f"  base\\ is empty: using title ID {base_tid:016X} from the update, "
-            "which then carries the whole game")
+        log(f"  base\\ is empty: leaving it out; the update ({base_tid:016X}) carries the whole game")
     try:
-        packages = pack(out, src, level=level, base_title_id=base_tid, progress=_progress)
+        if base_tid is None:
+            packages = pack(out, src, level=level, progress=_progress)
+        else:
+            packages = _without_base(lambda: pack(out, src, level=level,
+                                                  base_title_id=base_tid, progress=_progress))
     except SystemExit as e:  # nup reports layout problems this way
         raise ConvertError(str(e))
     print()

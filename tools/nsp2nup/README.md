@@ -57,8 +57,9 @@ You can also drop a folder that contains them.
 If another tool (e.g. an emulator's "Extract Data") already gave you the game's files, arrange them as
 `My Game\exefs\...` and `My Game\romfs\...` and drop the `My Game` folder onto `nsp2nup.bat`.
 It's packed as-is into `My Game.nup`. A `base\` / `updates\<version>\` / `dlc\<titleid>\0\` layout works too.
-If `base\` is empty because the dumper kept only the fully patched update, the title ID is taken from
-the update's `main.npdm` and the update carries the whole game.
+If `base\` is empty because the dumper kept only the fully patched update, it's left out and the update
+is packed on its own (marked standalone), carrying the whole game. An empty `base\exefs\` would otherwise
+make emulators look for the game's code in the wrong place.
 Name, icon and display version aren't available this way (they live in the Control NCA), so emulators
 show the title ID instead.
 

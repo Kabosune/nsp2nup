@@ -63,7 +63,15 @@ make emulators look for the game's code in the wrong place.
 Name, icon and display version aren't available this way (they live in the Control NCA), so emulators
 show the title ID instead.
 
-Command line: `py nsp2nup.py [files/folders...] [-o OUTDIR] [--tool PATH] [--level N] [--keep-work]`
+### Repairing a .nup
+
+Drop a `.nup` onto `nsp2nup.bat` to check it. If it has an empty base package (made from a dump whose
+`base\` was empty, which hides the update's ExeFS from emulators), nsp2nup rebuilds it as
+`Name (fixed).nup` next to the original, with the update carrying the whole game. The name, icons, version
+and NACP are kept, and the original file isn't touched. It needs temporary free space about the size
+of the game. A `.nup` with nothing to fix is left alone.
+
+Command line: `py nsp2nup.py [files/folders/.nup...] [-o OUTDIR] [--tool PATH] [--level N] [--keep-work]`
 
 ## Optional: single .exe
 

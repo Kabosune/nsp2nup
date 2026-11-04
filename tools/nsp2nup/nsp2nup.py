@@ -35,6 +35,8 @@ from nup import meta as M  # noqa: E402
 import nup.pack as P  # noqa: E402
 from nup.pack import pack, have_zstd  # noqa: E402
 from nup.discover import parse_npdm_program_id  # noqa: E402
+from nup.access import iter_children, meta_records  # noqa: E402
+from nup.read import NupReader  # noqa: E402
 
 # ---------------------------------------------------------------- constants
 
@@ -559,8 +561,8 @@ def is_dump_dir(p: str) -> bool:
     return any(os.path.isdir(os.path.join(p, d)) for d in ("exefs", "romfs", "base", "updates"))
 
 
-def collect_inputs(paths: list[str]) -> tuple[list[str], list[str], list[str]]:
-    nsps, keys, dumps = [], [], []
+def collect_inputs(paths: list[str]) -> tuple[list[str], list[str], list[str], list[str]]:
+    nsps, keys, dumps, nups = [], [], [], []
     for p in paths:
         p = p.strip().strip('"')
         p = os.path.abspath(p) if p else p
@@ -580,11 +582,13 @@ def collect_inputs(paths: list[str]) -> tuple[list[str], list[str], list[str]]:
             nsps.append(p)
         elif p.lower().endswith(".keys") and os.path.isfile(p):
             keys.append(p)
+        elif p.lower().endswith(".nup") and os.path.isfile(p):
+            nups.append(p)
         elif p.lower().endswith((".nsz", ".xci", ".xcz")):
             log(f"! skipping {os.path.basename(p)}: only plain .nsp is supported")
         elif p:
-            log(f"! skipping {os.path.basename(p)}: not an .nsp, .keys or game folder")
-    return nsps, keys, dumps
+            log(f"! skipping {os.path.basename(p)}: not an .nsp, .nup, .keys or game folder")
+    return nsps, keys, dumps, nups
 
 
 def unique_path(folder: str, stem: str) -> str:
@@ -654,6 +658,170 @@ def pack_dump(src: str, out_dir: str | None, level: int) -> str:
                                                   base_title_id=base_tid, progress=_progress))
     except SystemExit as e:  # nup reports layout problems this way
         raise ConvertError(str(e))
+    print()
+    for pk in packages:
+        log(f"  {F.KIND_NAMES[pk.kind]:<6} {pk.title_id:016X}  v{pk.version}")
+    return out
+
+
+# ---------------------------------------------------------------- repairing .nup files
+
+_CARRY_META = (F.TLV_NACP, F.TLV_ICON, F.TLV_DISPLAY_VERSION, F.TLV_TITLE_NAME,
+               F.TLV_PUBLISHER, F.TLV_LOCALIZED_TITLES, F.TLV_LOCALIZED_ICONS)
+
+
+class _Limited:
+    """File-like view of the next `left` bytes of fh (one extent)."""
+
+    def __init__(self, fh, left: int) -> None:
+        self.fh, self.left = fh, left
+
+    def read(self, n: int = -1) -> bytes:
+        if self.left <= 0:
+            return b""
+        n = self.left if n is None or n < 0 else min(n, self.left)
+        data = self.fh.read(n)
+        self.left -= len(data)
+        return data
+
+
+def _tree_files(r: NupReader, dir_index: int, dirs: list | None = None) -> list[tuple[int, str]]:
+    """(file index, relative path) for every file under a directory; subfolder
+    paths go into `dirs` if given (so empty folders survive a rebuild)."""
+    out, stack = [], [(dir_index, "")]
+    while stack:
+        di, rel = stack.pop()
+        for child in iter_children(r, di):
+            name = child.name.decode("utf-8", "surrogateescape")
+            path = os.path.join(rel, name) if rel else name
+            if child.is_dir:
+                stack.append((child.index, path))
+                if dirs is not None:
+                    dirs.append(path)
+            else:
+                out.append((child.index, path))
+    return out
+
+
+def _extract_streamed(r: NupReader, nup_path: str, files: list, dest: str,
+                      done: list, total: int) -> None:
+    """Extract files in chunks (no whole-file reads) and check each SHA-256."""
+    with open(nup_path, "rb") as src:
+        for fi, rel in files:
+            name, size, sha, eoff, esz, codec = r.files[fi]
+            target = os.path.join(dest, rel)
+            os.makedirs(os.path.dirname(target), exist_ok=True)
+            h = hashlib.sha256()
+            with open(target, "wb") as dst:
+                if size:
+                    src.seek(eoff)
+                    if codec == F.CODEC_RAW:
+                        reader = _Limited(src, esz)
+                    elif codec == F.CODEC_ZSTD:
+                        try:
+                            import zstandard
+                        except ImportError:
+                            raise ConvertError("this .nup is compressed and zstandard isn't "
+                                               "available to read it")
+                        reader = zstandard.ZstdDecompressor().stream_reader(_Limited(src, esz))
+                    else:
+                        raise ConvertError(f"{rel}: unknown codec {codec}")
+                    while True:
+                        chunk = reader.read(4 << 20)
+                        if not chunk:
+                            break
+                        h.update(chunk)
+                        dst.write(chunk)
+            if os.path.getsize(target) != size or (size and h.digest() != bytes(sha)):
+                raise ConvertError(f"{rel}: content doesn't match its checksum (damaged .nup?)")
+            done[0] += 1
+            _progress(done[0], total, None)
+
+
+def _with_app_meta(extra: dict[int, bytes], fn):
+    """Put carried-over app metadata (name, icons, NACP...) into the new app meta block."""
+    if not extra:
+        return fn()
+    orig = M.app_meta
+
+    def app_meta(*a, **k):
+        recs = M.parse_block(orig(*a, **k))
+        recs.update(extra)
+        return M.serialize_block(recs)
+
+    M.app_meta = app_meta
+    try:
+        return fn()
+    finally:
+        M.app_meta = orig
+
+
+def repair_nup(path: str, out_dir: str | None, level: int, keep_work: bool) -> str | None:
+    """Rebuild a .nup whose base package has no files (it hides the update's ExeFS).
+    Writes '<name> (fixed).nup' and leaves the original alone. None = nothing to fix."""
+    name = os.path.splitext(os.path.basename(path))[0]
+    folder = out_dir or os.path.dirname(os.path.abspath(path))
+    log(f"== checking {os.path.basename(path)}")
+    with NupReader(path) as r:
+        pkgs = list(r.packages)
+        base = next((p for p in pkgs if p.kind == F.KIND_BASE), None)
+        updates = [p for p in pkgs if p.kind == F.KIND_UPDATE]
+        if base is None or not updates or _tree_files(r, base.root_dir):
+            log("  nothing to repair (no empty base package)")
+            return None
+        log("  base package is empty: rebuilding with the update carrying the whole game")
+
+        extra: dict[int, bytes] = {}
+        for p in [base] + [q for q in pkgs if q is not base]:
+            for t, payload in meta_records(r, p):
+                if t in _CARRY_META and t not in extra:
+                    extra[t] = payload
+
+        jobs = [(u.root_dir, os.path.join("updates", str(u.version))) for u in updates]
+        seen: dict[int, int] = {}
+        for a in (p for p in pkgs if p.kind == F.KIND_ADDON):
+            n = seen.get(a.title_id, 0)
+            seen[a.title_id] = n + 1
+            jobs.append((a.root_dir, os.path.join("dlc", f"{a.title_id:016x}", str(n))))
+        for p in pkgs:
+            if p.kind not in (F.KIND_BASE, F.KIND_UPDATE, F.KIND_ADDON):
+                log(f"  ! skipping a {F.KIND_NAMES.get(p.kind, p.kind)} package (not supported)")
+
+        file_lists, all_dirs = [], []
+        for d, sub in jobs:
+            dirs: list[str] = []
+            file_lists.append((_tree_files(r, d, dirs), sub))
+            all_dirs += [os.path.join(sub, x) for x in dirs]
+        total = sum(len(f) for f, _ in file_lists)
+        need = sum(r.files[fi][1] for f, _ in file_lists for fi, _ in f)
+        work = os.path.join(folder, f"_nsp2nup_tmp_{os.getpid()}")
+        free = shutil.disk_usage(folder).free
+        if free < need * 2:
+            log(f"  ! low disk space: about {need * 2 / 2**30:.1f} GB needed while repairing, "
+                f"{free / 2**30:.1f} GB free")
+        dump = os.path.join(work, name)
+        log(f"  extracting {total} files ({need / 2**30:.1f} GB) to a temp folder")
+        try:
+            done = [0]
+            for d in all_dirs:
+                os.makedirs(os.path.join(dump, d), exist_ok=True)
+            for files, sub in file_lists:
+                _extract_streamed(r, path, files, os.path.join(dump, sub), done, total)
+            print()
+        except BaseException:
+            if not keep_work:
+                shutil.rmtree(work, ignore_errors=True)
+            raise
+    out = unique_path(folder, safe_filename(name) + " (fixed)")
+    log(f"  packing {os.path.basename(out)}")
+    try:
+        packages = _with_app_meta(extra, lambda: pack(out, dump, level=level,
+                                                      progress=_progress))
+    except SystemExit as e:
+        raise ConvertError(str(e))
+    finally:
+        if not keep_work:
+            shutil.rmtree(work, ignore_errors=True)
     print()
     for pk in packages:
         log(f"  {F.KIND_NAMES[pk.kind]:<6} {pk.title_id:016X}  v{pk.version}")
@@ -736,10 +904,11 @@ def main(argv: list[str] | None = None) -> int:
         prog="nsp2nup",
         description="Convert NSP files (base, updates, DLC) or already-extracted game "
                     "folders (exefs/ + romfs/) into .nup containers. "
-                    "Pass NSPs, .keys files or folders in any order.")
+                    "Pass NSPs, .keys files or folders in any order. A dropped .nup is "
+                    "checked and repaired into '<name> (fixed).nup' if needed.")
     ap.add_argument("inputs", nargs="*",
-                    help=".nsp files, prod.keys/title.keys, extracted game folders, or "
-                         "folders containing NSPs")
+                    help=".nsp files, prod.keys/title.keys, extracted game folders, "
+                         "folders containing NSPs, or .nup files to repair")
     ap.add_argument("-o", "--out-dir", help="where to write .nup files (default: next to the input)")
     ap.add_argument("--tool", "--hactoolnet", dest="tool",
                     help="path to hactoolnet or hactool if it isn't next to this tool")
@@ -749,8 +918,8 @@ def main(argv: list[str] | None = None) -> int:
                     help="don't copy dropped keys into the keys folder")
     args = ap.parse_args(argv)
 
-    nsps, key_files, dumps = collect_inputs(args.inputs)
-    if not (nsps or dumps):
+    nsps, key_files, dumps, nups = collect_inputs(args.inputs)
+    if not (nsps or dumps or nups):
         if key_files:
             try:
                 resolve_keys(key_files, save=not args.no_save_keys)
@@ -782,6 +951,14 @@ def main(argv: list[str] | None = None) -> int:
         except ConvertError as e:
             log(f"ERROR: {e}")
             failed += 1
+    for n in nups:
+        try:
+            fixed = repair_nup(n, args.out_dir, args.level, args.keep_work)
+            if fixed:
+                made.append((fixed, []))
+        except (ConvertError, F.NupError, OSError) as e:
+            log(f"ERROR: {n}: {e}")
+            failed += 1
 
     log("")
     for out, skipped in made:
@@ -791,7 +968,7 @@ def main(argv: list[str] | None = None) -> int:
     if failed:
         log(f"{failed} item(s) failed - see messages above.")
     partial = any(s for _, s in made)
-    return 0 if made and not failed and not partial else 1
+    return 0 if (made or nups) and not failed and not partial else 1
 
 
 if __name__ == "__main__":

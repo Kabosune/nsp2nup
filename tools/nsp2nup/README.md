@@ -8,6 +8,24 @@ Drag-and-drop converter from Nintendo Switch `.nsp` files to a single [`.nup`](h
 Base game, updates and DLC all go into one `.nup`. Works with Switch 1 and Switch 2 games
 (tested on The Legend of Zelda: Link's Awakening and Donkey Kong Bananza).
 
+## What it adds over `nup pack`
+
+nup packs folders that are already decrypted, and its metadata (name, icon, version...) has to be
+typed in by hand as options. nsp2nup works straight from the NSPs and fills the metadata in from the
+game's Control NCA:
+
+| | `nup pack` on its own | nsp2nup |
+|---|---|---|
+| Input | decrypted `exefs/` + `romfs/` folders | NSPs (or the same folders) |
+| Base + updates + DLC | you arrange `base/`, `updates/`, `dlc/` yourself | detected from each NSP's metadata |
+| Name (all languages), publisher | `--name`, `--lang-name`, `--publisher` | automatic |
+| Display version | `--display-version` | automatic |
+| Icons (all languages) | `--icon`, `--lang-icon` with image files you supply | automatic |
+| NACP (full control data) | no option | stored automatically |
+
+Already-extracted folders packed with nsp2nup get no metadata either, since it lives in the Control NCA
+(see below).
+
 ## Setup (once)
 
 1. **Python 3.10+** - install from python.org (tick "Add python.exe to PATH"),

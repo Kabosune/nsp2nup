@@ -1,8 +1,8 @@
 # nsp2nup
 
 > **Personal project, not for actual usage.** This is a hobby tool I made for myself. It's public so
-> [a55uka](https://github.com/a55uka/nup) (the nup author) can see it. There are no releases and no support,
-> and it may change or disappear at any time.
+> [a55uka](https://github.com/a55uka/nup) (the nup author) can see it. Releases are test builds for debugging and
+> trying it out, with no support, and it may change or disappear at any time.
 
 Drag-and-drop converter from Nintendo Switch `.nsp` files to a single [`.nup`](https://github.com/a55uka/nup) container.
 Base game, updates and DLC all go into one `.nup`. Works with Switch 1 and Switch 2 games

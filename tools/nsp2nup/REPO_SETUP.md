@@ -9,7 +9,7 @@ Handoff notes for the nsp2nup repo. Written so a future session (or you) can pic
 - **Works:** Switch 2 NSPs, tested for real on Donkey Kong Bananza with the bundled patched hactool. Stock hactool 1.4.0 always prints info (`-x` only adds extract to the default info+extract) and its NPDM printer follows offsets without bounds checks, so it crashes on Switch 2 program metadata. The bundled build (`hactool-1.4.0-nsp2nup.patch`) makes `-x` extract-only and skips an NPDM it can't parse. An old Ryujinx (LibHac 0.16.1) extracted Donkey Kong Bananza fine with the same keys, so keys/crypto aren't the issue.
 - **Building the patched hactool:** apply the patch to SciresM/hactool tag 1.4.0 and build as usual (mingw-w64, or `zig cc -target x86_64-windows-gnu`).
 - **Decrypters supported:** `hactool.exe` (SciresM) or `hactoolnet.exe` (LibHac). Found next to the script, in `tools\`, or on PATH; hactoolnet wins if both exist; `--tool PATH` overrides.
-- **Status:** personal project, public only so a55uka can see it. Not for actual usage: no releases, no support (README says so at the top).
+- **Status:** personal project, public only so a55uka can see it. Not for actual usage: releases are test builds (marked pre-release), no support (README says so at the top).
 
 ## Rules this repo must follow
 
@@ -64,7 +64,7 @@ The mocks only prove the plumbing. Real games are the real test.
 
 1. **Ask a55uka for a license** (issue on a55uka/nup), mentioning nsp2nup as a personal project since their README says they don't know of a Switch 1 converter.
 2. **Only if a55uka is interested:** offer a `nacp=` option for nup's `pack()` so nsp2nup stops patching `meta.app_meta` from outside.
-3. **Release exe (only if this stops being personal-only):** GitHub Actions workflow that builds `nsp2nup.exe` with PyInstaller.
+3. **Releases:** test builds go up as GitHub pre-releases: a zip of `tools/nsp2nup/` plus a copy of `tools/nup/nup` in `lib/nup/`, so it runs on its own (needs Python 3.10+). Optional later: a GitHub Actions workflow that also builds `nsp2nup.exe` with PyInstaller so Python isn't needed.
 4. **Metadata for extracted folders:** let users drop a Control NCA extraction (`control.nacp` + icons) beside `exefs\`/`romfs\` so folder mode gets names and icons too.
 5. **Switch 2:** works with the patched hactool (tested on Donkey Kong Bananza). If a later title fails on something new (e.g. compressed NCA sections, which hactool doesn't support), extend the patch or add a LibHac-based engine to the `Hac` class.
 6. **Unsupported for now:** `.nsz`/`.xci`, DLC updates (NUP v1 reserves that kind), multi-program titles (only the main program is packed).
